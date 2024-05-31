@@ -1,0 +1,301 @@
+/*********
+  Done by Serene Shirley 
+  April 3 2024
+  v6
+  Smart Pacifier Capstone
+*********/
+#include "BluetoothSerial.h"
+
+#define USE_PIN // Uncomment this to use PIN during pairing. The pin is specified on the line below
+const char *pin = "nuzzle"; // Change this to more secure PIN.
+
+String device_name = "NUZZLE";
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+#if !defined(CONFIG_BT_SPP_ENABLED)
+#error Serial Bluetooth not available or not enabled. It is only available for the ESP32 chip.
+#endif
+
+BluetoothSerial SerialBT;
+
+//temp sensor libraries
+#include <OneWire.h>                                 
+#include <DallasTemperature.h>
+
+//OLED libraries
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Fonts/Picopixel.h>
+#include "MAX30105.h"           //MAX3010x library
+#include "heartRate.h"
+#include "spo2_algorithm.h"
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C /// See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+
+#define REPORTING_PERIOD_MS 1000
+uint32_t tsLastReport = 0;
+
+
+// GPIO where the DS18B20 is connected to
+const int oneWireBus = 23;     
+
+// Setup a oneWire instance to communicate with any OneWire devices
+OneWire oneWire(oneWireBus);
+
+// Pass our oneWire reference to Dallas Temperature sensor 
+DallasTemperature sensors(&oneWire);
+
+MAX30105 particleSensor;
+#define MAX_BRIGHTNESS 255
+uint32_t irBuffer[100]; //infrared LED sensor data
+uint32_t redBuffer[100]; //red LED sensor data
+int32_t bufferLength; //data length
+int32_t spo2; //SPO2 value
+int8_t validSPO2; //indicator to show if the SPO2 calculation is valid
+int32_t heartRate; //heart rate value
+int8_t validHeartRate; //indicator to show if the heart rate calculation is valid
+//byte pulseLED = 11; //Must be on PWM pin
+//byte readLED = 13; //Blinks with each data read
+float BPM, SpO2, bodytemperature;
+
+char tempstr[6];
+char BPMstr[6];
+char SPO2str[6];
+int xx=40;
+int yy=0;
+
+
+const unsigned char PROGMEM pacifier[]= {
+ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x00, 0x00, 0x00, 
+  0x1f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x38, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x70, 0x0e, 0x00, 0x00, 
+  0x00, 0x00, 0xe0, 0x07, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x03, 0x00, 0x00, 0x70, 0x01, 0x80, 0x01, 
+  0x00, 0x00, 0xf8, 0x01, 0x80, 0x01, 0x00, 0x00, 0xdc, 0x01, 0x80, 0x01, 0x00, 0x00, 0xcc, 0x01, 
+  0x80, 0x01, 0x00, 0x00, 0xc6, 0x01, 0x80, 0x01, 0x00, 0x00, 0xc7, 0x01, 0x80, 0x01, 0x00, 0x00, 
+  0x63, 0x83, 0x80, 0x03, 0x00, 0x00, 0x71, 0xc7, 0x00, 0x07, 0x00, 0x00, 0x30, 0xce, 0x00, 0x0e, 
+  0x00, 0x00, 0x38, 0x7c, 0x00, 0x1c, 0x00, 0x00, 0x1c, 0x78, 0x0f, 0xf8, 0x00, 0x00, 0x0c, 0x38, 
+  0x1f, 0xe0, 0x00, 0x0f, 0xfe, 0x1c, 0x38, 0x00, 0x00, 0x3f, 0xfe, 0x0e, 0x70, 0x00, 0x00, 0xf8, 
+  0x1c, 0x07, 0xe0, 0x00, 0x03, 0xc0, 0x1c, 0x03, 0xc0, 0x00, 0x07, 0x0f, 0xf8, 0x01, 0xc0, 0x00, 
+  0x0e, 0x3f, 0xf0, 0x00, 0xf0, 0x00, 0x0c, 0x70, 0x60, 0x00, 0x38, 0x00, 0x18, 0xe0, 0x60, 0x00, 
+  0x1c, 0x00, 0x19, 0x80, 0x30, 0x00, 0x0e, 0x00, 0x33, 0x80, 0x18, 0x0f, 0x87, 0x80, 0x33, 0x00, 
+  0x0c, 0x1f, 0xc1, 0xc0, 0x76, 0x00, 0x06, 0x3e, 0xf0, 0xe0, 0x66, 0x00, 0x03, 0xe6, 0x78, 0x60, 
+  0x66, 0x00, 0x01, 0xe6, 0x1f, 0xe0, 0x66, 0x00, 0x00, 0x66, 0x07, 0xc0, 0x66, 0x00, 0x00, 0x66, 
+  0x00, 0x00, 0x66, 0x00, 0x00, 0x66, 0x00, 0x00, 0x66, 0x00, 0x00, 0x66, 0x00, 0x00, 0x76, 0x00, 
+  0x00, 0x6e, 0x00, 0x00, 0x33, 0x00, 0x00, 0xcc, 0x00, 0x00, 0x33, 0x80, 0x01, 0xcc, 0x00, 0x00, 
+  0x19, 0x80, 0x01, 0x98, 0x00, 0x00, 0x18, 0xe0, 0x07, 0x18, 0x00, 0x00, 0x0c, 0x70, 0x0e, 0x30, 
+  0x00, 0x00, 0x0e, 0x3f, 0xfc, 0x70, 0x00, 0x00, 0x07, 0x0f, 0xf0, 0xe0, 0x00, 0x00, 0x03, 0xc0, 
+  0x03, 0xc0, 0x00, 0x00, 0x00, 0xf8, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xfc, 0x00, 0x00, 0x00
+};
+
+static const unsigned char PROGMEM  logo2_bmp[] =
+{ 0x03, 0xC0, 0xF0, 0x06, 0x71, 0x8C, 0x0C, 0x1B, 0x06, 0x18, 0x0E,  0x02, 0x10, 0x0C, 0x03, 0x10,              //Logo2 and Logo3 are two bmp pictures  that display on the OLED if called
+0x04, 0x01, 0x10, 0x04, 0x01, 0x10, 0x40,  0x01, 0x10, 0x40, 0x01, 0x10, 0xC0, 0x03, 0x08, 0x88,
+0x02, 0x08, 0xB8, 0x04,  0xFF, 0x37, 0x08, 0x01, 0x30, 0x18, 0x01, 0x90, 0x30, 0x00, 0xC0, 0x60,
+0x00,  0x60, 0xC0, 0x00, 0x31, 0x80, 0x00, 0x1B, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x04, 0x00,  };
+
+static const unsigned char PROGMEM logo3_bmp[] =
+{ 0x01, 0xF0, 0x0F,  0x80, 0x06, 0x1C, 0x38, 0x60, 0x18, 0x06, 0x60, 0x18, 0x10, 0x01, 0x80, 0x08,
+0x20,  0x01, 0x80, 0x04, 0x40, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00, 0x02, 0xC0, 0x00, 0x08,  0x03,
+0x80, 0x00, 0x08, 0x01, 0x80, 0x00, 0x18, 0x01, 0x80, 0x00, 0x1C, 0x01,  0x80, 0x00, 0x14, 0x00,
+0x80, 0x00, 0x14, 0x00, 0x80, 0x00, 0x14, 0x00, 0x40,  0x10, 0x12, 0x00, 0x40, 0x10, 0x12, 0x00,
+0x7E, 0x1F, 0x23, 0xFE, 0x03, 0x31,  0xA0, 0x04, 0x01, 0xA0, 0xA0, 0x0C, 0x00, 0xA0, 0xA0, 0x08,
+0x00, 0x60, 0xE0,  0x10, 0x00, 0x20, 0x60, 0x20, 0x06, 0x00, 0x40, 0x60, 0x03, 0x00, 0x40, 0xC0,
+0x01,  0x80, 0x01, 0x80, 0x00, 0xC0, 0x03, 0x00, 0x00, 0x60, 0x06, 0x00, 0x00, 0x30, 0x0C,  0x00,
+0x00, 0x08, 0x10, 0x00, 0x00, 0x06, 0x60, 0x00, 0x00, 0x03, 0xC0, 0x00,  0x00, 0x01, 0x80, 0x00  };
+
+int lastState = HIGH; // the previous state from the input pin
+int monitormode=0;
+int buttonState = digitalRead(18);
+/********************************************************/
+void IRAM_ATTR modeISR(){
+  monitormode++;
+}
+
+void setup() {
+  
+  //BUTTON CODE
+  pinMode(18, INPUT_PULLUP);
+  //attachInterrupt(18, modeISR, FALLING); 
+ 
+  
+  // Start the Serial Monitor
+  Serial.begin(9600);
+  SerialBT.begin(device_name);
+  
+  // Start the DS18B20 sensor
+//  Serial.println("Initializing...");
+  sensors.begin();
+  
+  //setup OLED
+  display.begin(SSD1306_SWITCHCAPVCC,  0x3C); //Start the OLED display
+  display.display();
+  delay(3000);
+  display.clearDisplay();
+
+  // Initialize heart rate sensor
+  particleSensor.begin(Wire,I2C_SPEED_FAST); //Use default I2C port, 400kHz speed
+//  {Serial.println(F("MAX30102 was not found. Please check wiring/power."));
+//   //while (1);
+//   }
+  particleSensor.setup(); //Configure sensor with default  settings
+  particleSensor.setPulseAmplitudeRed(0x0A); //Turn Red LED to low to indicate sensor is running
+  particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
+
+   byte ledBrightness = 60; //Options: 0=Off to 255=50mA
+   byte sampleAverage = 4; //Options: 1, 2, 4, 8, 16, 32
+   byte ledMode = 2; //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green
+   byte sampleRate = 100; //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
+   int pulseWidth = 411; //Options: 69, 118, 215, 411
+   int adcRange = 4096; //Options: 2048, 4096, 8192, 16384
+
+   particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate,pulseWidth, adcRange); //Configure sensor with these settings
+
+  
+  nuzzle();
+  
+  
+}
+/********************************************************************************************************************************************************/
+void loop() {
+ 
+ sensors.requestTemperatures();
+ bodytemperature = (sensors.getTempCByIndex(0)); //Converting into Celsius
+ 
+ bufferLength = 100; //buffer length of 100 stores 4 seconds of samples running at 25sps
+ //read the first 100 samples, and determine the signal range
+ for (byte i = 0 ; i < bufferLength ; i++)
+ {
+   while (particleSensor.available() == false) //do we have new data?
+   particleSensor.check(); //Check the sensor for new data
+   redBuffer[i] = particleSensor.getRed();
+   irBuffer[i] = particleSensor.getIR();
+   
+   particleSensor.nextSample(); //We're finished with this sample so move to next sample
+  Serial.print("red=");
+  Serial.print(redBuffer[i], DEC);
+  Serial.print(", ir=");
+  Serial.println(irBuffer[i], DEC);
+ }
+ //calculate heart rate and SpO2 after first 100 samples (first 4 seconds of samples)
+ maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2,&validSPO2, &heartRate, &validHeartRate);
+ //Continuously taking samples from MAX30102. Heart rate and SpO2 are calculated every 1 second
+
+ //dumping the first 25 sets of samples in the memory and shift the last 75 sets of samples to the top
+ for (byte i = 25; i < 100; i++)
+ {
+ redBuffer[i - 25] = redBuffer[i];
+ irBuffer[i - 25] = irBuffer[i];
+ }
+ //take 25 sets of samples before calculating the heart rate.
+ for (byte i = 75; i < 100; i++)
+ {
+   while (particleSensor.available() == false) //do we have new data?
+   particleSensor.check(); //Check the sensor for new data
+   redBuffer[i] = particleSensor.getRed();
+   irBuffer[i] = particleSensor.getIR();
+   particleSensor.nextSample(); //We're finished with this sample so move to next sample
+  
+   //send samples and calculation result to terminal program through UART
+   Serial.print("red=");
+   Serial.print(redBuffer[i], DEC);
+   Serial.print(", ir=");
+   Serial.print(irBuffer[i], DEC);
+   Serial.print(", HR=");
+   Serial.print(heartRate, DEC);
+   Serial.print(", HRvalid=");
+   Serial.print(validHeartRate, DEC);
+   Serial.print(", SPO2=");
+   Serial.print(spo2, DEC);
+   Serial.print(", SPO2Valid=");
+   Serial.println(validSPO2, DEC);
+ }
+   //After gathering 25 new samples recalculate HR and SP02
+   maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer,&spo2, &validSPO2, &heartRate, &validHeartRate);
+  
+   BPM = heartRate;
+   SpO2 = spo2;
+   long ircheck = particleSensor.getIR();
+ if(ircheck  > 7000){
+   if (millis() - tsLastReport > REPORTING_PERIOD_MS)
+   {
+     Serial.println(heartRate);
+     SerialBT.print(heartRate);
+     SerialBT.print("|");
+     Serial.println(spo2);
+     SerialBT.print(spo2);
+      SerialBT.print("|");
+     Serial.println(bodytemperature);
+     SerialBT.println(bodytemperature);
+     SerialBT.println("°C");
+     
+     
+      sprintf(tempstr,"%.2f",bodytemperature);
+      sprintf(BPMstr,"%d",heartRate);
+      sprintf(SPO2str,"%d",spo2);
+      
+      display.clearDisplay();
+      display.setTextColor(WHITE);
+      display.setTextSize(1);
+      display.setFont(NULL);
+      display.setCursor(0, 0);
+      display.setTextWrap(0);
+      display.setCursor(46, 0);
+      display.println("Nuzzle");
+      display.setCursor(0, 20);
+      display.print("Temp ");
+      display.print(tempstr);
+      display.println("C");
+      display.setCursor(0, 35);
+      display.print("BPM ");
+      display.print(BPMstr);
+      display.println(" bpm");
+      display.setCursor(0, 50);
+      display.print("SPO2 ");
+      display.print(SPO2str);
+      display.println(" %");
+      display.display();
+
+//      if(spo2>100)
+//       caution(5);
+//       else{
+//          if(spo2<90)
+//           caution(6);
+//          else{
+//          if(heartRate<70)
+//           caution(4);
+//           else{
+//            if(heartRate>190)
+//             caution(3);
+//             else{
+            // if(bodytemperature<32)
+             // caution(2);
+               //else{
+                if(bodytemperature>34)
+                 caution(1);
+             //}
+//           //}
+//          }
+//       }
+     
+     tsLastReport = millis();
+    }
+  }
+  if(ircheck  < 7000){
+    display.clearDisplay();
+     display.setTextSize(1);                    
+     display.setTextColor(WHITE);             
+     display.setCursor(30,24);                
+     display.println("Please Place "); 
+     display.setCursor(15,42);
+     display.println("Pacifier in Mouth ");  
+     display.display();
+  }
+}
